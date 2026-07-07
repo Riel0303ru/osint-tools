@@ -1,0 +1,54 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+backend/venv/
+backend/.venv/
+backend/__pycache__/
+
+# Environment
+.env
+.env.*
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.production.local
+frontend/.env.test.local
+
+# Node.js
+node_modules/
+frontend/node_modules/
+
+dist/
+dist-ssr/
+build/
+frontend/dist/
+frontend/build/
+
+# IDE
+.vscode/
+!.vscode/extensions.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AI Models (opsional)
+# *.pt
+
+# Google Cloud Credential (SANGAT DISARANKAN)
+Osint/config/gcp_service_account.json
