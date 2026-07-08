@@ -27,6 +27,15 @@ frontend/.env.local
 frontend/.env.development.local
 frontend/.env.production.local
 frontend/.env.test.local
+Osint/.env
+Osint/.env.*
+
+# Local databases and dynamic scan files
+*.db
+Osint/data/*.db
+Osint/tests/*.db
+Osint/uploads/
+Osint/results/
 
 # Node.js
 node_modules/

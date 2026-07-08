@@ -42,3 +42,10 @@ geopy
 google-generativeai
 ffmpeg
 google-cloud-vision
+fastapi
+uvicorn
+sqlalchemy
+psycopg[binary]
+python-multipart
+alembic
+pytest

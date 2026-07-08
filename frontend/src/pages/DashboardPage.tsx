@@ -38,20 +38,26 @@ import {
 } from '../lib/mockData';
 import { formatRelativeTime, cn } from '../lib/utils';
 import { useNotificationStore } from '../store/appStore';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import type { ActivityEvent } from '../types';
 
-type QuickScanProps = {
-  onSubmit: (type: string, query: string) => void;
-};
+function QuickScan() {
+  const [selectedType, setSelectedType] = useState('username');
+  const [query, setQuery] = useState('');
+  const navigate = useNavigate();
 
-function QuickScan({ onSubmit }: QuickScanProps) {
   const scanTypes = [
     { id: 'username', label: 'Username', icon: <User className="w-4 h-4" /> },
     { id: 'email', label: 'Email', icon: <Mail className="w-4 h-4" /> },
     { id: 'domain', label: 'Domain', icon: <Globe className="w-4 h-4" /> },
     { id: 'ip', label: 'IP', icon: <Server className="w-4 h-4" /> },
   ];
+
+  const handleScan = () => {
+    if (!query.trim()) return;
+    navigate(`/${selectedType}?q=${encodeURIComponent(query)}`);
+  };
 
   return (
     <GlassCard className="p-6">
@@ -61,11 +67,12 @@ function QuickScan({ onSubmit }: QuickScanProps) {
           <button
             key={type.id}
             className={cn(
-              'flex items-center gap-2 px-4 py-2 rounded-lg',
-              'bg-white/5 border border-white/10',
-              'text-white/70 hover:text-white hover:bg-white/10',
-              'transition-all'
+              'flex items-center gap-2 px-4 py-2 rounded-lg transition-all',
+              selectedType === type.id
+                ? 'bg-accent-cyan/15 border border-accent-cyan/30 text-accent-cyan font-semibold'
+                : 'bg-white/5 border border-white/10 text-white/70 hover:text-white hover:bg-white/10'
             )}
+            onClick={() => setSelectedType(type.id)}
           >
             {type.icon}
             <span className="text-sm">{type.label}</span>
@@ -75,11 +82,16 @@ function QuickScan({ onSubmit }: QuickScanProps) {
       <div className="flex gap-3">
         <input
           type="text"
-          placeholder="Enter target to scan..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={`Enter ${selectedType} to scan...`}
           className="flex-1 h-11 px-4 bg-glass-dark border border-glass-border rounded-lg text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-accent-cyan/30"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') handleScan();
+          }}
         />
         <AnimatedButton
-          onClick={() => onSubmit('username', '')}
+          onClick={handleScan}
           glow
         >
           <Search className="w-4 h-4" />
@@ -360,7 +372,7 @@ export default function DashboardPage() {
 
       {/* Quick Scan */}
       <div className="mb-6">
-        <QuickScan onSubmit={handleQuickScan} />
+        <QuickScan />
       </div>
 
       {/* Charts Row */}

@@ -55,7 +55,7 @@ class CorrelationWorkflow:
 
     def _get_all_results(self) -> List:
         """Ambil semua hasil scan dari storage (semua target, timestamp terbaru per target)."""
-        cur = self.storage.conn.execute(
+        cur = self.storage.execute(
             "SELECT DISTINCT username FROM scan_results"
         )
         targets = [row["username"] for row in cur.fetchall()]

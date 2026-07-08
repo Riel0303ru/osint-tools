@@ -39,9 +39,9 @@ class GraphBuilder:
         query = "SELECT DISTINCT username FROM scan_results"
         if username_filter:
             query += " WHERE username LIKE ?"
-            rows = self.storage.conn.execute(query, (f"%{username_filter}%",)).fetchall()
+            rows = self.storage.execute(query, (f"%{username_filter}%",)).fetchall()
         else:
-            rows = self.storage.conn.execute(query).fetchall()
+            rows = self.storage.execute(query).fetchall()
         return {row["username"] for row in rows}
 
     def _guess_type(self, identifier: str) -> str:
@@ -69,7 +69,7 @@ class GraphBuilder:
         """
         edges = set()
         # 1) Koneksi dari timestamp yang sama (satu kali scan)
-        rows = self.storage.conn.execute(
+        rows = self.storage.execute(
             "SELECT DISTINCT username, scan_timestamp FROM scan_results"
         ).fetchall()
         # Kelompokkan berdasarkan timestamp
@@ -84,7 +84,7 @@ class GraphBuilder:
                     edges.add((u1, u2))
 
         # 2) Koneksi dari platform yang sama (antar identifier)
-        platform_rows = self.storage.conn.execute(
+        platform_rows = self.storage.execute(
             "SELECT DISTINCT platform, username FROM scan_results WHERE status='FOUND'"
         ).fetchall()
         platform_map: Dict[str, List[str]] = {}
@@ -99,7 +99,7 @@ class GraphBuilder:
         # Ambil extra yang mengandung domain
         # Ekstrak domain dari email atau field 'domain' di extra
         domain_map: Dict[str, List[str]] = {}
-        all_rows = self.storage.conn.execute(
+        all_rows = self.storage.execute(
             "SELECT username, extra_json FROM scan_results WHERE extra_json != '{}'"
         ).fetchall()
         for row in all_rows:

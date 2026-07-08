@@ -11,29 +11,71 @@ import {
   SearchInput,
 } from '../components/ui';
 import { ScanLauncher, ResultsHeader, ResultSection, FindingCard } from '../components/intelligence/ScanLauncher';
-import { platformDiscoveryData } from '../lib/mockData';
+import { api } from '../lib/api';
 import { cn } from '../lib/utils';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 export default function UsernamePage() {
+  const [searchParams] = useSearchParams();
   const [target, setTarget] = useState('');
   const [scanning, setScanning] = useState(false);
   const [results, setResults] = useState<any>(null);
 
-  const handleScan = (query: string) => {
+  const handleScan = async (query: string) => {
     setTarget(query);
     setScanning(true);
-    // Simulate scan
-    setTimeout(() => {
-      setScanning(false);
+    setResults(null);
+    try {
+      const data = await api.scanUsername(query);
+      const linked = data.find((r: any) => r.platform === 'Identity Correlation');
+      const persona = data.find((r: any) => r.platform === 'Persona Classification');
+      const platforms = data.filter((r: any) => r.platform !== 'Identity Correlation' && r.platform !== 'Persona Classification');
+      
+      const maxIntelScore = Math.max(...data.map((r: any) => r.intelligence_score || 0), 0);
+      let level: 'safe' | 'low' | 'medium' | 'high' | 'critical' = 'safe';
+      if (maxIntelScore > 80) level = 'critical';
+      else if (maxIntelScore > 60) level = 'high';
+      else if (maxIntelScore > 40) level = 'medium';
+      else if (maxIntelScore > 20) level = 'low';
+
+      let aiText = '';
+      try {
+        const aiRes = await api.analyzeAI("Summarize findings and assess digital persona identity", query, "username");
+        aiText = aiRes.ai_analysis?.summary || aiRes.ai_analysis?.narrative || aiRes.narrative || '';
+      } catch (e) {
+        aiText = `Analysis of target "${query}" complete. Persona classification: ${persona?.extra?.persona?.persona || 'unknown'}.`;
+      }
+
       setResults({
         target: query,
-        platforms: platformDiscoveryData,
-        riskScore: { level: 'medium', score: 45 },
+        platforms: platforms.map((p: any) => ({
+          platform: p.platform,
+          exists: p.status === 'FOUND',
+          url: p.url,
+          confidence: Math.round((p.confidence || 0) * 100),
+          extra: p.extra
+        })),
+        riskScore: { level, score: Math.round(maxIntelScore) },
         timestamp: new Date().toISOString(),
+        linkedAccounts: linked?.extra?.linked_accounts || [],
+        persona: persona?.extra?.persona || null,
+        aiText
       });
-    }, 2000);
+    } catch (error: any) {
+      console.error(error);
+      alert(`Scan failed: ${error.message || error}`);
+    } finally {
+      setScanning(false);
+    }
   };
+
+  useEffect(() => {
+    const q = searchParams.get('q');
+    if (q) {
+      handleScan(q);
+    }
+  }, [searchParams]);
 
   return (
     <PageContainer>
@@ -94,7 +136,15 @@ export default function UsernamePage() {
                 riskScore={results.riskScore}
                 timestamp={results.timestamp}
                 exportable
-                onExport={() => console.log('Export')}
+                onExport={() => {
+                  api.generateReport(results.target).then((res) => {
+                    if (res.pdf_generated) {
+                      window.open(api.getDownloadReportUrl(results.target), '_blank');
+                    } else {
+                      alert('Report generated but PDF file download is unavailable.');
+                    }
+                  }).catch(err => alert(`Report generation failed: ${err.message}`));
+                }}
               />
 
               {/* Platform Discoveries */}
@@ -159,45 +209,47 @@ export default function UsernamePage() {
               </ResultSection>
 
               {/* Identity Correlations */}
-              <ResultSection title="Identity Correlations" defaultOpen={false}>
-                <div className="space-y-3">
-                  <FindingCard
-                    title="Email Address Found"
-                    description="Associated email detected on GitHub profile"
-                    severity="medium"
-                    source="GitHub"
-                    action={
-                      <AnimatedButton variant="ghost" size="sm">
-                        <ExternalLink className="w-4 h-4" />
-                      </AnimatedButton>
-                    }
-                  />
-                  <FindingCard
-                    title="Name Pattern Match"
-                    description="DisplayName matches expected format across 3 platforms"
-                    severity="low"
-                    source="Cross-Platform"
-                  />
-                </div>
-              </ResultSection>
+              {results.linkedAccounts && results.linkedAccounts.length > 0 && (
+                <ResultSection title="Identity Correlations" defaultOpen={true}>
+                  <div className="space-y-3">
+                    {results.linkedAccounts.map((acc: any, i: number) => (
+                      <FindingCard
+                        key={i}
+                        title="Platform Association Found"
+                        description={`Linked profile match between ${acc.platform_a} and ${acc.platform_b}`}
+                        severity={acc.confidence > 0.8 ? "medium" : "low"}
+                        source="Cross-Platform Engine"
+                        action={
+                          acc.url_b ? (
+                            <a href={acc.url_b} target="_blank" rel="noopener noreferrer">
+                              <AnimatedButton variant="ghost" size="sm">
+                                <ExternalLink className="w-4 h-4" />
+                              </AnimatedButton>
+                            </a>
+                          ) : undefined
+                        }
+                      />
+                    ))}
+                  </div>
+                </ResultSection>
+              )}
 
               {/* AI Insights */}
-              <ResultSection title="AI Intelligence Summary" defaultOpen={false}>
-                <GlassCard variant="light" className="p-4">
-                  <p className="text-sm text-white/80 leading-relaxed">
-                    The username "{results.target}" has a significant digital footprint across
-                    multiple platforms. A correlation analysis suggests a high likelihood that
-                    this identity is authentic, with consistent profile attributes across GitHub,
-                    LinkedIn, and Twitter. No suspicious activity patterns were detected.
-                    Consider expanding the investigation to include email intelligence for
-                    a more comprehensive identity profile.
-                  </p>
-                  <div className="flex gap-2 mt-4">
-                    <Badge variant="success">Consistent Identity</Badge>
-                    <Badge variant="info">Professional Presence</Badge>
-                  </div>
-                </GlassCard>
-              </ResultSection>
+              {results.aiText && (
+                <ResultSection title="AI Intelligence Summary" defaultOpen={true}>
+                  <GlassCard variant="light" className="p-4">
+                    <p className="text-sm text-white/80 leading-relaxed whitespace-pre-wrap">
+                      {results.aiText}
+                    </p>
+                    {results.persona && (
+                      <div className="flex gap-2 mt-4">
+                        <Badge variant="info">Digital Persona: {results.persona.persona?.toUpperCase()}</Badge>
+                        <Badge variant="success">Confidence: {Math.round(results.persona.confidence * 100)}%</Badge>
+                      </div>
+                    )}
+                  </GlassCard>
+                </ResultSection>
+              )}
             </motion.div>
           ) : (
             <GlassCard className="p-12 flex flex-col items-center justify-center text-center">
@@ -217,3 +269,4 @@ export default function UsernamePage() {
     </PageContainer>
   );
 }
+

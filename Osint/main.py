@@ -477,7 +477,7 @@ class OSINTFusionApp:
 
     def handle_history_menu(self):
         self.show_section_title("SCAN HISTORY & DELTA")
-        cur = self.scan_manager.storage.conn.execute(
+        cur = self.scan_manager.storage.execute(
             "SELECT DISTINCT username FROM scan_results ORDER BY username"
         )
         targets = [row["username"] for row in cur.fetchall()]

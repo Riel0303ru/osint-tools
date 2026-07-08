@@ -1,67 +1,133 @@
 # core/base/storage.py
-import sqlite3
-import json
 import os
+import json
 import csv
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
+
+from sqlalchemy import create_engine, Column, Integer, Text, Float, text, func, select
+from sqlalchemy.orm import declarative_base, sessionmaker
+
 from core.base.scan_result import ScanResult
+
+Base = declarative_base()
+
+class ScanResultModel(Base):
+    __tablename__ = "scan_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(Text, nullable=False, index=True)
+    platform = Column(Text, nullable=False)
+    status = Column(Text, nullable=False)
+    status_code = Column(Integer)
+    url = Column(Text)
+    confidence = Column(Float, default=1.0)
+    intelligence_score = Column(Float, default=0.0)
+    extra_json = Column(Text, default="{}")
+    scan_timestamp = Column(Text, nullable=False, index=True)
+
+
+class DictLikeRow:
+    """Compatibility wrapper for SQLAlchemy Row objects to support dictionary-like access (row['col'])."""
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self._mapping.values())[key]
+        return self._mapping[key]
+
+    def get(self, key, default=None):
+        return self._mapping.get(key, default)
+
+    def keys(self):
+        return self._mapping.keys()
+
+
+class ResultWrapper:
+    """Wrapper to make SQLAlchemy query results compatible with standard sqlite3 cursor outputs."""
+    def __init__(self, result):
+        self.result = result
+
+    def fetchall(self) -> List[DictLikeRow]:
+        return [DictLikeRow(row) for row in self.result.mappings().fetchall()]
+
+    def fetchone(self) -> Optional[DictLikeRow]:
+        row = self.result.mappings().fetchone()
+        return DictLikeRow(row) if row else None
 
 
 class Storage:
-    """SQLite-based scan history, delta detection, and metadata persistence."""
+    """SQLAlchemy-based scan history, delta detection, and metadata persistence."""
 
-    def __init__(self, db_path: str = "data/osint_history.db"):
-        self.db_path = db_path
-        self._ensure_db()
+    def __init__(self, db_path: Optional[str] = None):
+        # 1. Load DATABASE_URL from env or parameter
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            # Fallback to local SQLite using db_path or default
+            path = db_path or "Osint/data/osint_history.db"
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            db_url = f"sqlite:///{path}"
 
-    def _ensure_db(self):
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.row_factory = sqlite3.Row
-        self._create_tables()
+        # Ensure correct prefix for SQLite
+        if db_url.startswith("sqlite:///"):
+            sqlite_path = db_url.replace("sqlite:///", "")
+            if sqlite_path:
+                os.makedirs(os.path.dirname(os.path.abspath(sqlite_path)), exist_ok=True)
+        elif db_url.startswith("postgresql://"):
+            db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
-    def _create_tables(self):
-        with self.conn:
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS scan_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT NOT NULL,
-                    platform TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    status_code INTEGER,
-                    url TEXT,
-                    confidence REAL DEFAULT 1.0,
-                    intelligence_score REAL DEFAULT 0.0,
-                    extra_json TEXT DEFAULT '{}',
-                    scan_timestamp TEXT NOT NULL
-                )
-            """)
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_username_platform
-                ON scan_results(username, platform)
-            """)
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_username_timestamp
-                ON scan_results(username, scan_timestamp)
-            """)
+        self.engine = create_engine(db_url, pool_pre_ping=True)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        
+        # Auto-create tables for SQLite ease of use, Alembic handles PostgreSQL production migrations
+        if "sqlite" in db_url:
+            Base.metadata.create_all(bind=self.engine)
 
-    # =========================================================
-    # HELPERS
-    # =========================================================
+    def execute(self, query: str, params: tuple = ()) -> ResultWrapper:
+        """
+        Legacy raw query execution compatibility layer.
+        Converts SQLite (?) or PostgreSQL (%s) placeholders to SQLAlchemy named parameters.
+        """
+        param_dict = {}
+        # Convert SQLite ? parameters to named SQLAlchemy parameters
+        if "?" in query:
+            parts = query.split("?")
+            new_query = ""
+            for i, part in enumerate(parts[:-1]):
+                new_query += f"{part}:p{i}"
+                param_dict[f"p{i}"] = params[i]
+            new_query += parts[-1]
+            query = new_query
+        # Convert Postgres %s parameters to named SQLAlchemy parameters
+        elif "%s" in query:
+            parts = query.split("%s")
+            new_query = ""
+            for i, part in enumerate(parts[:-1]):
+                new_query += f"{part}:p{i}"
+                param_dict[f"p{i}"] = params[i]
+            new_query += parts[-1]
+            query = new_query
+
+        session = self.SessionLocal()
+        try:
+            res = session.execute(text(query), param_dict or params)
+            session.commit()
+            return ResultWrapper(res)
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     @staticmethod
     def _make_json_safe(obj: Any) -> Any:
-        """
-        Secara rekursif mengonversi objek menjadi JSON-safe.
-        Boolean diubah menjadi integer (0/1), objek lain yang tidak
-        bisa di-serialisasi diubah menjadi string.
-        """
         if isinstance(obj, dict):
             return {k: Storage._make_json_safe(v) for k, v in obj.items()}
         elif isinstance(obj, list):
             return [Storage._make_json_safe(i) for i in obj]
         elif isinstance(obj, bool):
-            return int(obj)          # True -> 1, False -> 0
+            return int(obj)
         elif isinstance(obj, (int, float, str, type(None))):
             return obj
         else:
@@ -72,31 +138,31 @@ class Storage:
     # =========================================================
 
     def save_scan(self, username: str, results: List[ScanResult]) -> str:
-        """
-        Simpan seluruh hasil scan dalam satu transaksi dengan timestamp UTC.
-        Mengembalikan timestamp yang digunakan.
-        """
         timestamp = datetime.now(timezone.utc).isoformat()
-        with self.conn:
+        session = self.SessionLocal()
+        try:
             for r in results:
-                # Sanitasi extra agar selalu JSON‑serializable
                 extra_safe = self._make_json_safe(r.extra) if r.extra else {}
                 extra_json = json.dumps(extra_safe)
-                self.conn.execute(
-                    """INSERT INTO scan_results
-                       (username, platform, status, status_code, url, confidence,
-                        intelligence_score, extra_json, scan_timestamp)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (username,
-                     r.platform,
-                     r.status,
-                     r.status_code,
-                     r.url,
-                     r.confidence,
-                     r.intelligence_score,
-                     extra_json,
-                     timestamp)
+                
+                model = ScanResultModel(
+                    username=username,
+                    platform=r.platform,
+                    status=r.status,
+                    status_code=r.status_code,
+                    url=r.url,
+                    confidence=r.confidence,
+                    intelligence_score=r.intelligence_score,
+                    extra_json=extra_json,
+                    scan_timestamp=timestamp
                 )
+                session.add(model)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
         return timestamp
 
     # =========================================================
@@ -104,34 +170,44 @@ class Storage:
     # =========================================================
 
     def get_distinct_timestamps(self, username: str) -> List[str]:
-        """Daftar timestamp scan yang ada untuk seorang pengguna (terbaru dulu)."""
-        cur = self.conn.execute(
-            "SELECT DISTINCT scan_timestamp FROM scan_results "
-            "WHERE username = ? ORDER BY scan_timestamp DESC",
-            (username,)
-        )
-        return [row["scan_timestamp"] for row in cur.fetchall()]
+        session = self.SessionLocal()
+        try:
+            stmt = (
+                select(ScanResultModel.scan_timestamp)
+                .where(ScanResultModel.username == username)
+                .distinct()
+                .order_by(ScanResultModel.scan_timestamp.desc())
+            )
+            rows = session.execute(stmt).scalars().all()
+            return list(rows)
+        finally:
+            session.close()
 
     def get_scan_snapshot(self, username: str, timestamp: str) -> List[ScanResult]:
-        """Ambil semua hasil scan pada timestamp tertentu."""
-        cur = self.conn.execute(
-            "SELECT * FROM scan_results WHERE username = ? AND scan_timestamp = ?",
-            (username, timestamp)
-        )
-        results = []
-        for row in cur.fetchall():
-            extra = json.loads(row["extra_json"]) if row["extra_json"] else {}
-            results.append(ScanResult(
-                platform=row["platform"],
-                username=row["username"],
-                status=row["status"],
-                status_code=row["status_code"],
-                url=row["url"],
-                confidence=row["confidence"],
-                intelligence_score=row["intelligence_score"],
-                extra=extra
-            ))
-        return results
+        session = self.SessionLocal()
+        try:
+            stmt = (
+                select(ScanResultModel)
+                .where(ScanResultModel.username == username)
+                .where(ScanResultModel.scan_timestamp == timestamp)
+            )
+            models = session.execute(stmt).scalars().all()
+            results = []
+            for m in models:
+                extra = json.loads(m.extra_json) if m.extra_json else {}
+                results.append(ScanResult(
+                    platform=m.platform,
+                    username=m.username,
+                    status=m.status,
+                    status_code=m.status_code,
+                    url=m.url,
+                    confidence=m.confidence,
+                    intelligence_score=m.intelligence_score,
+                    extra=extra
+                ))
+            return results
+        finally:
+            session.close()
 
     def get_latest_scan(self, username: str) -> List[ScanResult]:
         timestamps = self.get_distinct_timestamps(username)
@@ -139,15 +215,90 @@ class Storage:
             return []
         return self.get_scan_snapshot(username, timestamps[0])
 
+    def get_paginated_history(self, page: int, limit: int) -> List[str]:
+        """Gets paginated distinct list of target usernames scanned."""
+        session = self.SessionLocal()
+        try:
+            stmt = (
+                select(ScanResultModel.username)
+                .distinct()
+                .order_by(ScanResultModel.username)
+                .limit(limit)
+                .offset((page - 1) * limit)
+            )
+            rows = session.execute(stmt).scalars().all()
+            return list(rows)
+        finally:
+            session.close()
+
+    def get_total_history_count(self) -> int:
+        """Gets total count of unique targets scanned."""
+        session = self.SessionLocal()
+        try:
+            stmt = select(func.count(ScanResultModel.username.distinct()))
+            return session.execute(stmt).scalar() or 0
+        finally:
+            session.close()
+
     # =========================================================
     # DELTA DETECTION
     # =========================================================
 
+    def get_delta(self, username: str, new_results: List[ScanResult]) -> List[Dict[str, Any]]:
+        old_results = self.get_latest_scan(username)
+        old_map = {r.platform: r for r in old_results}
+        new_map = {r.platform: r for r in new_results}
+
+        changes = []
+        all_platforms = set(list(old_map.keys()) + list(new_map.keys()))
+
+        for platform in sorted(all_platforms):
+            old_r = old_map.get(platform)
+            new_r = new_map.get(platform)
+
+            if old_r is None and new_r is not None:
+                changes.append({
+                    "type": "NEW",
+                    "platform": platform,
+                    "details": f"Akun baru: {new_r.url} (status={new_r.status})"
+                })
+            elif old_r is not None and new_r is None:
+                changes.append({
+                    "type": "LOST",
+                    "platform": platform,
+                    "details": f"Akun hilang: {old_r.url} sebelumnya status={old_r.status}"
+                })
+            else:
+                detail_parts = []
+                if old_r.status != new_r.status:
+                    detail_parts.append(f"Status: {old_r.status} \u2192 {new_r.status}")
+                if old_r.status_code != new_r.status_code:
+                    detail_parts.append(f"Kode: {old_r.status_code} \u2192 {new_r.status_code}")
+                if abs(old_r.confidence - new_r.confidence) > 0.001:
+                    detail_parts.append(f"Confidence: {old_r.confidence:.2f} \u2192 {new_r.confidence:.2f}")
+                if abs(old_r.intelligence_score - new_r.intelligence_score) > 0.001:
+                    detail_parts.append(f"Intel: {old_r.intelligence_score:.2f} \u2192 {new_r.intelligence_score:.2f}")
+
+                old_extra = old_r.extra or {}
+                new_extra = new_r.extra or {}
+                if old_extra != new_extra:
+                    changed_keys = []
+                    for k in set(list(old_extra.keys()) + list(new_extra.keys())):
+                        if old_extra.get(k) != new_extra.get(k):
+                            changed_keys.append(k)
+                    if changed_keys:
+                        detail_parts.append(f"Metadata berubah: {', '.join(changed_keys)}")
+
+                if detail_parts:
+                    changes.append({
+                        "type": "UPDATED",
+                        "platform": platform,
+                        "details": "; ".join(detail_parts)
+                    })
+
+        return changes
+
     def compare_scans(self, username: str, ts1: str, ts2: str) -> Dict[str, Any]:
-        """
-        Bandingkan dua snapshot (ts1 = older, ts2 = newer).
-        Mengembalikan dict dengan daftar perubahan (NEW, LOST, UPDATED).
-        """
         old = self.get_scan_snapshot(username, ts1)
         new = self.get_scan_snapshot(username, ts2)
 
@@ -176,15 +327,14 @@ class Storage:
             else:
                 detail_parts = []
                 if old_r.status != new_r.status:
-                    detail_parts.append(f"Status: {old_r.status} → {new_r.status}")
+                    detail_parts.append(f"Status: {old_r.status} \u2192 {new_r.status}")
                 if old_r.status_code != new_r.status_code:
-                    detail_parts.append(f"Kode: {old_r.status_code} → {new_r.status_code}")
+                    detail_parts.append(f"Kode: {old_r.status_code} \u2192 {new_r.status_code}")
                 if abs(old_r.confidence - new_r.confidence) > 0.001:
-                    detail_parts.append(f"Confidence: {old_r.confidence:.2f} → {new_r.confidence:.2f}")
+                    detail_parts.append(f"Confidence: {old_r.confidence:.2f} \u2192 {new_r.confidence:.2f}")
                 if abs(old_r.intelligence_score - new_r.intelligence_score) > 0.001:
-                    detail_parts.append(f"Intel: {old_r.intelligence_score:.2f} → {new_r.intelligence_score:.2f}")
+                    detail_parts.append(f"Intel: {old_r.intelligence_score:.2f} \u2192 {new_r.intelligence_score:.2f}")
 
-                # Deep diff pada extra
                 old_extra = old_r.extra or {}
                 new_extra = new_r.extra or {}
                 if old_extra != new_extra:
