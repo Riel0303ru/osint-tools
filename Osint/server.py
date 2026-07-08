@@ -3,15 +3,18 @@ import os
 import shutil
 import math
 import re
+import time
+import asyncio
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
 # Load environmental configs first
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env.local")
 load_dotenv()  # Fallback to standard .env
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, status
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -22,14 +25,68 @@ from core.correlation.correlation_workflow import CorrelationWorkflow
 from core.ai.ai_workflow import AIWorkflow
 from core.report.report_generator import ReportGenerator
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Starts a background loop to automatically purge scan caches and uploads older than 24 hours."""
+    async def cleanup_loop():
+        while True:
+            try:
+                paths_to_clean = [
+                    Path("Osint/results"),
+                    Path("Osint/uploads"),
+                    Path("Osint/Osint/results"),
+                    Path("Osint/Osint/uploads"),
+                    Path("results"),
+                    Path("uploads")
+                ]
+                now = time.time()
+                max_age_seconds = 24 * 3600  # 24 hours
+                for p in paths_to_clean:
+                    if p.exists() and p.is_dir():
+                        for root, dirs, files in os.walk(p):
+                            for file in files:
+                                file_path = Path(root) / file
+                                try:
+                                    # Delete if older than 24 hours
+                                    if now - file_path.stat().st_mtime > max_age_seconds:
+                                        file_path.unlink()
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+            await asyncio.sleep(3600)  # Check once every hour
+
+    task = asyncio.create_task(cleanup_loop())
+    yield
+    task.cancel()
+
+
 # Initialize FastAPI App with automatic Swagger/ReDoc docs enabled
 app = FastAPI(
     title="OSINT Fusion API",
     description="REST API server wrapping the Python OSINT advanced scanner workflows.",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
+
+
+async def run_scan_with_disconnect_check(request: Request, coro):
+    """Executes a coroutine as an asyncio Task, periodically checking if the client disconnected.
+    If the client closes the connection, the task is cancelled immediately.
+    """
+    task = asyncio.create_task(coro)
+    while not task.done():
+        if await request.is_disconnected():
+            task.cancel()
+            print("[INFO] Connection dropped by client. Cancelling background task.")
+            return None
+        await asyncio.sleep(0.2)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        return None
 
 # CORS configurations
 app.add_middleware(
@@ -133,70 +190,101 @@ def health_check():
 
 
 @app.post("/api/scan/username")
-async def api_scan_username(req: UsernameScanRequest):
+async def api_scan_username(req: UsernameScanRequest, request: Request):
     if not req.username.strip():
         return error_response("Username cannot be empty", "ERR_INVALID_INPUT")
     try:
-        results = await scan_manager.execute_username_workflow(
-            username=req.username,
-            budget=req.budget,
-            priority_platforms=req.priority_platforms
+        results = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_username_workflow(
+                username=req.username,
+                budget=req.budget,
+                priority_platforms=req.priority_platforms
+            )
         )
+        if results is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
         return success_response([r.to_dict() for r in results])
     except Exception as e:
         return error_response(str(e))
 
 
 @app.post("/api/scan/email")
-async def api_scan_email(req: EmailScanRequest):
+async def api_scan_email(req: EmailScanRequest, request: Request):
     if not req.email.strip():
         return error_response("Email cannot be empty", "ERR_INVALID_INPUT")
     try:
-        results = await scan_manager.execute_email_workflow(req.email)
+        results = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_email_workflow(req.email)
+        )
+        if results is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
         return success_response([r.to_dict() for r in results])
     except Exception as e:
         return error_response(str(e))
 
 
 @app.post("/api/scan/domain")
-async def api_scan_domain(req: DomainScanRequest):
+async def api_scan_domain(req: DomainScanRequest, request: Request):
     if not req.domain.strip():
         return error_response("Domain cannot be empty", "ERR_INVALID_INPUT")
     try:
-        results = await scan_manager.execute_domain_workflow(req.domain)
+        results = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_domain_workflow(req.domain)
+        )
+        if results is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
         return success_response([r.to_dict() for r in results])
     except Exception as e:
         return error_response(str(e))
 
 
 @app.post("/api/scan/phone")
-async def api_scan_phone(req: PhoneScanRequest):
+async def api_scan_phone(req: PhoneScanRequest, request: Request):
     if not req.phone.strip():
         return error_response("Phone cannot be empty", "ERR_INVALID_INPUT")
     try:
-        results = await scan_manager.execute_phone_workflow(req.phone)
+        results = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_phone_workflow(req.phone)
+        )
+        if results is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
         return success_response([r.to_dict() for r in results])
     except Exception as e:
         return error_response(str(e))
 
 
 @app.post("/api/scan/ip")
-async def api_scan_ip(req: IPScanRequest):
+async def api_scan_ip(req: IPScanRequest, request: Request):
     if not req.ip.strip():
         return error_response("IP cannot be empty", "ERR_INVALID_INPUT")
     try:
-        results = await scan_manager.execute_ip_workflow(req.ip)
+        results = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_ip_workflow(req.ip)
+        )
+        if results is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
         return success_response([r.to_dict() for r in results])
     except Exception as e:
         return error_response(str(e))
 
 
 @app.post("/api/scan/company")
-async def api_scan_company(req: CompanyScanRequest):
+async def api_scan_company(req: CompanyScanRequest, request: Request):
     if not req.domain.strip():
         return error_response("Domain cannot be empty", "ERR_INVALID_INPUT")
     try:
-        results, full_report = await scan_manager.execute_company_workflow(req.domain)
+        output = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_company_workflow(req.domain)
+        )
+        if output is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
+        results, full_report = output
         return success_response({
             "results": [r.to_dict() for r in results],
             "report": full_report
@@ -206,49 +294,68 @@ async def api_scan_company(req: CompanyScanRequest):
 
 
 @app.post("/api/scan/darkweb")
-async def api_scan_darkweb(req: DarkwebScanRequest):
+async def api_scan_darkweb(req: DarkwebScanRequest, request: Request):
     if not req.target.strip():
         return error_response("Target cannot be empty", "ERR_INVALID_INPUT")
     try:
-        results = await scan_manager.execute_darkweb_workflow(req.target)
+        results = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_darkweb_workflow(req.target)
+        )
+        if results is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
         return success_response([r.to_dict() for r in results])
     except Exception as e:
         return error_response(str(e))
 
 
 @app.post("/api/scan/image")
-async def api_scan_image(file: UploadFile = File(...)):
+async def api_scan_image(file: UploadFile = File(...), request: Request = None):
     try:
         temp_path = save_uploaded_file(file)
-        results = await scan_manager.execute_image_workflow(temp_path)
-        # Results is returned as list of ScanResult from execute_image_workflow
+        results = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_image_workflow(temp_path)
+        )
+        if results is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
         return success_response([r.to_dict() for r in results])
     except Exception as e:
         return error_response(str(e))
 
 
 @app.post("/api/scan/document")
-async def api_scan_document(file: UploadFile = File(...)):
+async def api_scan_document(file: UploadFile = File(...), request: Request = None):
     try:
         temp_path = save_uploaded_file(file)
-        results = await scan_manager.execute_document_workflow(temp_path)
+        results = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_document_workflow(temp_path)
+        )
+        if results is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
         return success_response([r.to_dict() for r in results])
     except Exception as e:
         return error_response(str(e))
 
 
 @app.post("/api/scan/video")
-async def api_scan_video(file: UploadFile = File(...)):
+async def api_scan_video(file: UploadFile = File(...), request: Request = None):
     try:
         temp_path = save_uploaded_file(file)
-        results = await scan_manager.execute_video_workflow(temp_path)
+        results = await run_scan_with_disconnect_check(
+            request,
+            scan_manager.execute_video_workflow(temp_path)
+        )
+        if results is None:
+            return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
         return success_response([r.to_dict() for r in results])
     except Exception as e:
         return error_response(str(e))
 
 
 @app.post("/api/ai/analyze")
-async def api_ai_analyze(req: AIAnalyzeRequest):
+async def api_ai_analyze(req: AIAnalyzeRequest, request: Request):
     try:
         ai_workflow = AIWorkflow()
         if req.target_id:
@@ -259,11 +366,21 @@ async def api_ai_analyze(req: AIAnalyzeRequest):
             
             # Format results as dicts for compatibility
             results_dicts = [r.to_dict() for r in results]
-            analysis = await ai_workflow.execute(req.target_id, req.module_name or "general", results_dicts)
+            analysis = await run_scan_with_disconnect_check(
+                request,
+                ai_workflow.execute(req.target_id, req.module_name or "general", results_dicts)
+            )
+            if analysis is None:
+                return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
             return success_response(analysis)
         else:
             # General prompt chatbot fallback
-            response = await ai_workflow.analyzer.analyze(req.prompt)
+            response = await run_scan_with_disconnect_check(
+                request,
+                ai_workflow.analyzer.analyze(req.prompt)
+            )
+            if response is None:
+                return error_response("Scan cancelled due to client disconnection", "ERR_CANCELLED")
             if not response.get("success"):
                 return error_response(response.get("error", "AI Analysis failed"), "ERR_AI_API")
             return success_response(response.get("analysis"))

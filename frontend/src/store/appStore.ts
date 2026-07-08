@@ -172,10 +172,15 @@ type UIState = {
   aiPanelOpen: boolean;
   graphFullscreen: boolean;
   settingsOpen: boolean;
+  warningToast: { show: boolean; message: string } | null;
+  activeAbortController: AbortController | null;
   setLoading: (loading: boolean, message?: string) => void;
   setAIPanelOpen: (open: boolean) => void;
   setGraphFullscreen: (fullscreen: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
+  showWarningToast: (message: string) => void;
+  hideWarningToast: () => void;
+  setActiveAbortController: (controller: AbortController | null) => void;
 };
 
 export const useUIStore = create<UIState>((set) => ({
@@ -184,10 +189,15 @@ export const useUIStore = create<UIState>((set) => ({
   aiPanelOpen: false,
   graphFullscreen: false,
   settingsOpen: false,
+  warningToast: null,
+  activeAbortController: null,
   setLoading: (loading, message = '') => set({ isLoading: loading, loadingMessage: message }),
   setAIPanelOpen: (open) => set({ aiPanelOpen: open }),
   setGraphFullscreen: (fullscreen) => set({ graphFullscreen: fullscreen }),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
+  showWarningToast: (message) => set({ warningToast: { show: true, message } }),
+  hideWarningToast: () => set({ warningToast: null }),
+  setActiveAbortController: (controller) => set({ activeAbortController: controller }),
 }));
 
 // ============================================

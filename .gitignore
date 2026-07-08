@@ -32,10 +32,10 @@ Osint/.env.*
 
 # Local databases and dynamic scan files
 *.db
-Osint/data/*.db
-Osint/tests/*.db
-Osint/uploads/
-Osint/results/
+**/data/*.db
+**/tests/*.db
+**/uploads/
+**/results/
 
 # Node.js
 node_modules/
